@@ -1732,6 +1732,9 @@ static struct dwc2_hsotg_req *get_ep_head(struct dwc2_hsotg_ep *hs_ep)
 					queue);
 }
 
+static void dwc2_hsotg_ep_stop_xfr(struct dwc2_hsotg *hsotg,
+				   struct dwc2_hsotg_ep *hs_ep);
+
 /**
  * dwc2_gadget_start_next_request - Starts next request from ep queue
  * @hs_ep: Endpoint structure
@@ -1751,8 +1754,14 @@ static void dwc2_gadget_start_next_request(struct dwc2_hsotg_ep *hs_ep)
 		dwc2_hsotg_start_req(hsotg, hs_ep, hs_req, false);
 		return;
 	}
-	if (!hs_ep->isochronous)
+	if (!hs_ep->isochronous) {
+		if (hs_ep->index && !dir_in) {
+			/* No new request, stop xfer and NAK on this endpoint. */
+			dev_dbg(hsotg->dev, "No request, stop %s\n", hs_ep->ep.name);
+			dwc2_hsotg_ep_stop_xfr(hsotg, hs_ep);
+		}
 		return;
+	}
 
 	if (dir_in) {
 		dev_dbg(hsotg->dev, "%s: No more ISOC-IN requests\n",
@@ -2932,9 +2941,6 @@ static void dwc2_gadget_handle_out_token_ep_disabled(struct dwc2_hsotg_ep *ep)
 		dwc2_gadget_start_next_request(ep);
 
 }
-
-static void dwc2_hsotg_ep_stop_xfr(struct dwc2_hsotg *hsotg,
-				   struct dwc2_hsotg_ep *hs_ep);
 
 /**
  * dwc2_gadget_handle_nak - handle NAK interrupt
@@ -4144,6 +4150,16 @@ static int dwc2_hsotg_ep_enable(struct usb_ep *ep,
 
 	case USB_ENDPOINT_XFER_BULK:
 		epctrl |= DXEPCTL_EPTYPE_BULK;
+		/*
+		 * By default the OUT packets are going to be acked and stored
+		 * in the RX FIFO, even though no request has been queued. That
+		 * can lead to fulfill the FIFO before any request has been
+		 * queued, resulting in a stuck endpoint where the FIFO can't
+		 * be emptied. So NAK the OUT packets until requests has been
+		 * queued.
+		 */
+		if (hs_ep->index && !dir_in)
+			epctrl |= DXEPCTL_SNAK;
 		break;
 
 	case USB_ENDPOINT_XFER_INT:
